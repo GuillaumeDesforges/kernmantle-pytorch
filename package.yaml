@@ -1,0 +1,17 @@
+name: kernmantle-pytorch
+version: 0.1.0
+description: An example of kernmantle for data science
+
+dependencies:
+  - base
+  - directory
+  - kernmantle
+  - path
+  - process
+
+library:
+  source-dirs: src
+
+executable:
+  main: Main.hs
+  source-dirs: src

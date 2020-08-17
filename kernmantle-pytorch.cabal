@@ -1,0 +1,39 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.34.2.
+--
+-- see: https://github.com/sol/hpack
+
+name:           kernmantle-pytorch
+version:        0.1.0
+description:    An example of kernmantle for data science
+build-type:     Simple
+
+library
+  exposed-modules:
+      Main
+  other-modules:
+      Paths_kernmantle_pytorch
+  hs-source-dirs:
+      src
+  build-depends:
+      base
+    , directory
+    , kernmantle
+    , path
+    , process
+  default-language: Haskell2010
+
+executable kernmantle-pytorch
+  main-is: Main.hs
+  other-modules:
+      Paths_kernmantle_pytorch
+  hs-source-dirs:
+      src
+  build-depends:
+      base
+    , directory
+    , kernmantle
+    , path
+    , process
+  default-language: Haskell2010

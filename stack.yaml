@@ -1,0 +1,16 @@
+resolver: lts-16.9
+
+packages:
+  - .
+
+extra-deps:
+  - git: git@github.com:tweag/kernmantle.git
+    commit: e450b65a0f27027a9d8a450ebb5aa5396e51b8ea
+    subdirs:
+      - kernmantle
+  - vinyl-0.13.0@sha256:0f247cd3f8682b30881a07de18e6fec52d540646fbcb328420049cc8d63cd407,3724
+
+nix:
+  enable: true
+  shell-file: ./shell.nix
+
