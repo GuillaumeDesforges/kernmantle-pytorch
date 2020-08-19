@@ -4,10 +4,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE Arrows #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Main where
 
-import Control.Arrow (Arrow)
+import Control.Arrow
 import Control.Kernmantle.Rope
   ( AnyRopeWith,
     HasKleisli,
@@ -35,6 +37,7 @@ import Path
     parent,
     parseAbsDir,
     parseRelDir,
+    parseRelFile,
     reldir,
     relfile,
     toFilePath,
@@ -59,6 +62,7 @@ data TorchHubModel
       -- ^ torch hub GitHub
       String
       -- ^ model name
+  deriving (Show)
 
 -- | Represent some data to predict on
 type Data = Path Abs File
@@ -71,7 +75,20 @@ data Predict i o where
   -- | Pull a model from the internet
   Predict :: TorchHubModel -> Predict Data Prediction
 
+
+-- | Get some image given some identifier
+data GetImage a b where
+  GetImage :: GetImage String Data
+
 -- * Interpreters
+
+-- | Interprets @GetImage@ by looking into a folder under the CWD
+handleGetImage :: (Arrow core, MonadIO m, HasKleisli m core) =>
+  Path Abs Dir -> GetImage i o -> core i o
+handleGetImage cwd GetImage =
+  liftKleisliIO $ \imageId -> do
+    imgSubPath <- parseRelFile imageId
+    return $ cwd </> [reldir|./data/images|] </> imgSubPath
 
 -- | Interpret the @Predict@ effect
 handlePredict ::
@@ -108,7 +125,7 @@ handlePredict hubStoreDir scriptsDir predictionDir (Predict model@(TorchHubModel
             (toFilePath predictionDir) <> ":" <> (toFilePath predictionDir),
             -- Run as current user
             "--user",
-            "1000",
+            "1001",
             -- Set cwd in docker to output directory
             "--workdir",
             (toFilePath predictionDir),
@@ -133,7 +150,7 @@ handlePredict hubStoreDir scriptsDir predictionDir (Predict model@(TorchHubModel
 
 downloadModel :: Path Abs Dir -> Path Abs Dir -> TorchHubModel -> IO Bool
 downloadModel hubStoreDir scriptsDir (TorchHubModel modelGitHub modelName) = do
-  putStrLn $ "Will download " <> modelName
+  putStrLn $ "Downloading model: " <> modelName
   -- Download the model
   dockerProcessHandle <-
     spawnProcess
@@ -147,7 +164,7 @@ downloadModel hubStoreDir scriptsDir (TorchHubModel modelGitHub modelName) = do
         (toFilePath $ scriptsDir) <> ":/scripts",
         -- Run as current user
         "--user",
-        "1000",
+        "1001",
         -- Use pytorch image
         "pytorch-custom",
         -- Pyton command
@@ -177,24 +194,30 @@ runPipeline pipeline = do
   let (models, runtimePipeline) =
         pipeline
           & loosen
-          & weave' #dataScience (handlePredict hubStoreDir scriptsDir predictionDir)
+          & weave' #predict (handlePredict hubStoreDir scriptsDir predictionDir)
+          & weave' #images (handleGetImage cwd)
           & untwine
           & runWriter
+  putStrLn $ "The pipeline uses the following models: " ++ show models
   downloadSuccesses <- forM models (downloadModel hubStoreDir scriptsDir)
   case all id downloadSuccesses of
     True -> do
-      result <- runtimePipeline & perform (cwd </> [relfile|./data/images/dog.jpg|])
+      result <- do putStrLn "Starting pipeline"
+                   runtimePipeline & perform ()
       print result
     False -> putStrLn "Failed to download one or more models"
 
--- Some pipeline that will succeed
-pipeline = strand #dataScience $ Predict $ TorchHubModel "pytorch/vision:v0.6.0" "inception_v3"
-
--- Some pipeline that will fail
-failingPipeline = strand #dataScience $ Predict $ TorchHubModel "pytorch/vision:v0.6.0" "rubbish"
+pipeline = proc () -> do
+  image <- getImage -< "dog.jpg"
+  -- Some task that will succeed:
+  predictWith "inception_v3" -< image
+  -- Some task that will fail, model doesn't exist:
+  predictWith "rubbish" -< image
+  where
+    getImage = strand #images GetImage
+    predictWith model =
+      strand #predict $ Predict $ TorchHubModel "pytorch/vision:v0.6.0" model
 
 main = do
   -- Pipeline that succeeds
   runPipeline pipeline
-  -- Pipeline that fails
-  runPipeline failingPipeline
