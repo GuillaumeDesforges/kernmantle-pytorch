@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 5be5eea6a4a17928d10556f738dc67f6450def9a77bb83fff4d73d9f4cbbc28f
+-- hash: a58e6431ef36dbe37c9b48fbb61271f206525d35bd3e91a1d10eb286428d1dfb
 
 name:           kernmantle-pytorch
 version:        0.1.0
@@ -21,9 +21,12 @@ library
   build-depends:
       base
     , directory
+    , hashable
     , kernmantle
     , path
     , process
+    , transformers
+    , unordered-containers
   default-language: Haskell2010
 
 executable kernmantle-pytorch
@@ -35,7 +38,10 @@ executable kernmantle-pytorch
   build-depends:
       base
     , directory
+    , hashable
     , kernmantle
     , path
     , process
+    , transformers
+    , unordered-containers
   default-language: Haskell2010

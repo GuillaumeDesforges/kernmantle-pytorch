@@ -6,34 +6,34 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
 
 module Main where
 
+import Prelude hiding (id, (.))
+import Control.Category
 import Control.Arrow
+import Control.Monad.Trans.Writer
+import Data.Functor.Identity
+import Data.Hashable
 import Control.Kernmantle.Rope
-  ( AnyRopeWith,
-    HasKleisli,
-    Writer,
-    liftKleisliIO,
+  ( Cayley(..),
     loosen,
-    perform,
     runCayley,
-    runWriter,
     strand,
     untwine,
     weave',
-    writing,
     (&),
-    type (~>),
   )
+  
 import Control.Monad (forM)
-import Control.Monad.IO.Class (MonadIO)
 import Path
   ( Abs,
     Dir,
     File,
     Path,
-    Rel,
     parent,
     parseAbsDir,
     parseRelDir,
@@ -46,12 +46,12 @@ import Path
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
 import System.Exit (ExitCode (..))
 import System.Process
-  ( CmdSpec (..),
-    CreateProcess (..),
-    createProcess,
-    spawnProcess,
+  ( spawnProcess,
     waitForProcess,
   )
+import Data.HashSet as HashSet
+import GHC.Generics (Generic)
+import Data.List (intercalate)
 
 -- * Binary effects
 
@@ -62,7 +62,7 @@ data TorchHubModel
       -- ^ torch hub GitHub
       String
       -- ^ model name
-  deriving (Show)
+  deriving (Show, Eq, Generic, Hashable)
 
 -- | Represent some data to predict on
 type Data = Path Abs File
@@ -70,38 +70,66 @@ type Data = Path Abs File
 -- | Represent some prediction
 type Prediction = Path Abs File
 
+-- | How to build a docker image for some "docker run" task. Each different spec
+-- will trigger a new build.
+data DockerImageSpec = DockerImageSpec { baseImage :: String
+                             , extraPipPkgs :: HashSet.HashSet String }
+  deriving (Eq, Generic, Hashable)
+
+-- | The name of the image is obtained by hashing the specs
+dockerSpecImageName :: DockerImageSpec -> String
+dockerSpecImageName spec = "kernmantle-pip-" ++ show (hash spec)
+
 -- | A "Data Science" effect
 data Predict i o where
   -- | Pull a model from the internet
   Predict :: TorchHubModel -> Predict Data Prediction
 
-
 -- | Get some image given some identifier
 data GetImage a b where
   GetImage :: GetImage String Data
 
--- * Interpreters
+-- | Collect everything that's gonna be needed by the pipeline
+data Requirements = Requirements { reqDockerImageSpecs :: HashSet.HashSet DockerImageSpec
+                                 , reqModelNames :: HashSet.HashSet TorchHubModel }
+instance Semigroup Requirements where
+  Requirements d m <> Requirements d' m' = Requirements (d <> d') (m <> m')
+instance Monoid Requirements where
+  mempty = Requirements mempty mempty
+
+-- | The target in which to interpret the effects
+newtype Core a b = Core (a -> IO b, Requirements)
+  deriving (Category, Arrow)
+           via Cayley (Writer Requirements) (Kleisli IO)
+
+-- * Interpreters. We make them very monomorphic (constrained to one single Core
+-- * type) for simplicity's sake, but they could be rendered more polymorphic.
 
 -- | Interprets @GetImage@ by looking into a folder under the CWD
-handleGetImage :: (Arrow core, MonadIO m, HasKleisli m core) =>
-  Path Abs Dir -> GetImage i o -> core i o
-handleGetImage cwd GetImage =
-  liftKleisliIO $ \imageId -> do
+handleGetImage ::
+  Path Abs Dir -> GetImage i o -> Core i o
+handleGetImage cwd GetImage = Core
+  (\imageId -> do
     imgSubPath <- parseRelFile imageId
     return $ cwd </> [reldir|./data/images|] </> imgSubPath
+  ,mempty)
+
+predictImageSpec, downloadImageSpec :: DockerImageSpec
+predictImageSpec = DockerImageSpec "pytorch/pytorch" (HashSet.fromList ["scipy"])
+downloadImageSpec = predictImageSpec  -- This spec happens to be the same, but
+                                      -- it could be a different one
 
 -- | Interpret the @Predict@ effect
 handlePredict ::
-  (Arrow core, MonadIO m, HasKleisli m core) =>
   Path Abs Dir ->
   Path Abs Dir ->
   Path Abs Dir ->
   Predict i o ->
-  (Writer [TorchHubModel] ~> core) i o
+  Core i o
 -- Pull a model from the Web
 handlePredict hubStoreDir scriptsDir predictionDir (Predict model@(TorchHubModel modelGitHub modelName)) =
-  writing [model] $
-    liftKleisliIO $ \dataFile -> do
+  Core (
+    \dataFile -> do
       -- Get path to directory of input data file
       let dataDir = parent dataFile
       -- Get path to file to write prediction in
@@ -130,7 +158,7 @@ handlePredict hubStoreDir scriptsDir predictionDir (Predict model@(TorchHubModel
             "--workdir",
             (toFilePath predictionDir),
             -- Use pytorch image
-            "pytorch-custom",
+            (dockerSpecImageName predictImageSpec),
             -- Pyton command
             "python",
             "/scripts/predict.py",
@@ -145,7 +173,26 @@ handlePredict hubStoreDir scriptsDir predictionDir (Predict model@(TorchHubModel
         ExitSuccess -> putStrLn "Prediction done"
         ExitFailure _ -> putStrLn "Failed to predict"
       return predictionFile
+    , Requirements (HashSet.fromList [predictImageSpec]) (HashSet.fromList [model]))
 
+-- | Builds some needed docker images
+buildDockerImageSpec :: Path Abs Dir -> DockerImageSpec -> IO ()
+buildDockerImageSpec dockerFilesFolder spec@(DockerImageSpec base pipPkgs) = do
+  let dockerfileContent = "FROM " ++ base ++"\n\n"++"RUN pip install " ++ intercalate " " (HashSet.toList pipPkgs)
+      name = dockerSpecImageName spec
+  subfolderName <- parseRelDir name
+  let subfolder = dockerFilesFolder </> subfolderName
+      dockerfile = subfolder </> [relfile|Dockerfile|]
+  createDirectoryIfMissing True (toFilePath subfolder)
+  writeFile (toFilePath dockerfile) dockerfileContent
+  putStrLn $ "Building " ++ name ++ ":\n" ++ dockerfileContent
+  dockerProcessHandle <-
+    spawnProcess "docker" ["build", toFilePath subfolder, "-t", name]
+  dockerExitCode <- waitForProcess dockerProcessHandle
+  case dockerExitCode of
+    ExitSuccess -> putStrLn "Build successful"
+    ExitFailure _ -> error "Build failed"
+  
 -- * Run
 
 downloadModel :: Path Abs Dir -> Path Abs Dir -> TorchHubModel -> IO Bool
@@ -166,7 +213,7 @@ downloadModel hubStoreDir scriptsDir (TorchHubModel modelGitHub modelName) = do
         "--user",
         "1001",
         -- Use pytorch image
-        "pytorch-custom",
+        (dockerSpecImageName downloadImageSpec),
         -- Pyton command
         "python",
         "/scripts/pull.py",
@@ -182,6 +229,7 @@ downloadModel hubStoreDir scriptsDir (TorchHubModel modelGitHub modelName) = do
 runPipeline pipeline = do
   -- Get current working directory
   cwd <- parseAbsDir =<< getCurrentDirectory
+  let dockerfilesFolder = cwd </> [reldir|./tmp/docker-builds/|]
   -- Get path to pytorch hub store directory
   let hubStoreDir = cwd </> [reldir|./tmp/pytorch/hub|]
   createDirectoryIfMissing True (toFilePath hubStoreDir)
@@ -191,33 +239,43 @@ runPipeline pipeline = do
   let predictionDir = cwd </> [reldir|./tmp/predictions|]
 
   -- Weave strands, and do the "load-time" processing of the pipeline
-  let (models, runtimePipeline) =
+  let Core (runtimePipeline, Requirements dockerSpecs models) =
         pipeline
           & loosen
           & weave' #predict (handlePredict hubStoreDir scriptsDir predictionDir)
           & weave' #images (handleGetImage cwd)
           & untwine
-          & runWriter
+  putStrLn $ "Finding docker images locally or building them"
+  mapM (buildDockerImageSpec dockerfilesFolder)
+       (HashSet.toList $ HashSet.insert downloadImageSpec dockerSpecs)
+       -- We add the image needed to download to the mix, as it will be needed
+       -- by 'downloadModel'
   putStrLn $ "The pipeline uses the following models: " ++ show models
-  downloadSuccesses <- forM models (downloadModel hubStoreDir scriptsDir)
+  downloadSuccesses <- forM (HashSet.toList models) (downloadModel hubStoreDir scriptsDir)
+  -- If everything is OK, we actually start the pipeline:
   case all id downloadSuccesses of
     True -> do
       result <- do putStrLn "Starting pipeline"
-                   runtimePipeline & perform ()
+                   runtimePipeline ()
       print result
     False -> putStrLn "Failed to download one or more models"
+
+-- * The pipeline
 
 pipeline = proc () -> do
   image <- getImage -< "dog.jpg"
   -- Some task that will succeed:
   predictWith "inception_v3" -< image
   -- Some task that will fail, model doesn't exist:
-  predictWith "rubbish" -< image
+  -- predictWith "rubbish" -< image
   where
     getImage = strand #images GetImage
     predictWith model =
       strand #predict $ Predict $ TorchHubModel "pytorch/vision:v0.6.0" model
 
+-- * Main function
+
+main :: IO ()
 main = do
   -- Pipeline that succeeds
   runPipeline pipeline
