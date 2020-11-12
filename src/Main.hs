@@ -73,7 +73,7 @@ type Prediction = Path Abs File
 -- | How to build a docker image for some "docker run" task. Each different spec
 -- will trigger a new build.
 data DockerImageSpec = DockerImageSpec { baseImage :: String
-                             , extraPipPkgs :: HashSet.HashSet String }
+                                       , extraPipPkgs :: HashSet.HashSet String }
   deriving (Eq, Generic, Hashable)
 
 -- | The name of the image is obtained by hashing the specs
@@ -86,8 +86,8 @@ data Predict i o where
   Predict :: TorchHubModel -> Predict Data Prediction
 
 -- | Get some image given some identifier
-data GetImage a b where
-  GetImage :: GetImage String Data
+data GetPicture a b where
+  GetPicture :: GetPicture String Data
 
 -- | Collect everything that's gonna be needed by the pipeline
 data Requirements = Requirements { reqDockerImageSpecs :: HashSet.HashSet DockerImageSpec
@@ -105,13 +105,13 @@ newtype Core a b = Core (a -> IO b, Requirements)
 -- * Interpreters. We make them very monomorphic (constrained to one single Core
 -- * type) for simplicity's sake, but they could be rendered more polymorphic.
 
--- | Interprets @GetImage@ by looking into a folder under the CWD
-handleGetImage ::
-  Path Abs Dir -> GetImage i o -> Core i o
-handleGetImage cwd GetImage = Core
+-- | Interprets @GetPicture@ by looking into a folder under the CWD
+handleGetPicture ::
+  Path Abs Dir -> GetPicture i o -> Core i o
+handleGetPicture cwd GetPicture = Core
   (\imageId -> do
     imgSubPath <- parseRelFile imageId
-    return $ cwd </> [reldir|./data/images|] </> imgSubPath
+    return $ cwd </> [reldir|./data/pictures|] </> imgSubPath
   ,mempty)
 
 predictImageSpec, downloadImageSpec :: DockerImageSpec
@@ -178,7 +178,10 @@ handlePredict hubStoreDir scriptsDir predictionDir (Predict model@(TorchHubModel
 -- | Builds some needed docker images
 buildDockerImageSpec :: Path Abs Dir -> DockerImageSpec -> IO ()
 buildDockerImageSpec dockerFilesFolder spec@(DockerImageSpec base pipPkgs) = do
-  let dockerfileContent = "FROM " ++ base ++"\n\n"++"RUN pip install " ++ intercalate " " (HashSet.toList pipPkgs)
+  let dockerfileContent = "FROM " ++ base ++"\n"
+        ++ (if not (HashSet.null pipPkgs)
+             then "RUN pip install " ++ intercalate " " (HashSet.toList pipPkgs)
+             else "")
       name = dockerSpecImageName spec
   subfolderName <- parseRelDir name
   let subfolder = dockerFilesFolder </> subfolderName
@@ -243,7 +246,7 @@ runPipeline pipeline = do
         pipeline
           & loosen
           & weave' #predict (handlePredict hubStoreDir scriptsDir predictionDir)
-          & weave' #images (handleGetImage cwd)
+          & weave' #pictures (handleGetPicture cwd)
           & untwine
   putStrLn ">>> BEGINNING CONFIG-TIME <<<"
   putStrLn "Finding docker images locally or building them"
@@ -251,7 +254,7 @@ runPipeline pipeline = do
        (HashSet.toList $ HashSet.insert downloadImageSpec dockerSpecs)
        -- We add the image needed to download to the mix, as it will be needed
        -- by 'downloadModel'
-  putStrLn $ "The pipeline uses the following models: " ++ show models
+  putStrLn $ "The pipeline uses the following models: " ++ show (HashSet.toList models)
   downloadSuccesses <- forM (HashSet.toList models) (downloadModel hubStoreDir scriptsDir)
   -- If everything is OK, we actually start the pipeline:
   case all id downloadSuccesses of
@@ -270,7 +273,7 @@ pipeline = proc () -> do
   -- Some task that will fail, model doesn't exist:
   -- predictWith "rubbish" -< image
   where
-    getImage = strand #images GetImage
+    getImage = strand #pictures GetPicture
     predictWith model =
       strand #predict $ Predict $ TorchHubModel "pytorch/vision:v0.6.0" model
 
