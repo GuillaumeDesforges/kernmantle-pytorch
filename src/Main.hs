@@ -245,7 +245,8 @@ runPipeline pipeline = do
           & weave' #predict (handlePredict hubStoreDir scriptsDir predictionDir)
           & weave' #images (handleGetImage cwd)
           & untwine
-  putStrLn $ "Finding docker images locally or building them"
+  putStrLn ">>> BEGINNING CONFIG-TIME <<<"
+  putStrLn "Finding docker images locally or building them"
   mapM (buildDockerImageSpec dockerfilesFolder)
        (HashSet.toList $ HashSet.insert downloadImageSpec dockerSpecs)
        -- We add the image needed to download to the mix, as it will be needed
@@ -255,7 +256,7 @@ runPipeline pipeline = do
   -- If everything is OK, we actually start the pipeline:
   case all id downloadSuccesses of
     True -> do
-      result <- do putStrLn "Starting pipeline"
+      result <- do putStrLn ">>> BEGINNING PROCESS-TIME <<<"
                    runtimePipeline ()
       print result
     False -> putStrLn "Failed to download one or more models"
